@@ -1,0 +1,48 @@
+[package]
+name = "typstd"
+version = "0.0.0"
+description = "A plain and simple language server for Typst markup language."
+authors = ["Daniel Bershatsky <daniel.bershatsky@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+documentation = "https://github.com/daskol/typstd"
+repository = "https://github.com/daskol/typstd"
+edition = "2021"
+
+[[bin]]
+name = "typstd"
+path = "src/bin/main.rs"
+
+[[bin]]
+name = "typstd-compile"
+path = "src/bin/compile.rs"
+
+[dependencies]
+# Asynchronous programming packages.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+
+# Command line interface.
+clap = { version = "4", features = ["derive"] }
+
+# Asset management.
+fontdb = { version = "0.15", features = ["memmap", "fontconfig"] }
+
+# Language server protocol.
+tower-lsp = { version = "0.20.0", features = ["proposed"] }
+
+# Logging facility.
+log = { version = "0.4" }
+structured-logger = { version = "1" }
+
+# Telemetry dependencies.
+opentelemetry = { version = "0.20.0", optional = true }
+tracing-opentelemetry = { version = "0.21.0", optional = true }
+
+# Typst packages.
+comemo = "0.3"
+typst = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
+typst-ide = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
+typst-pdf = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
+
+[features]
+telemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
