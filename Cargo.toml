@@ -18,14 +18,15 @@ name = "typstd-compile"
 path = "src/bin/compile.rs"
 
 [dependencies]
+# Asset management.
+fontdb = { version = "0.15", features = ["memmap", "fontconfig"] }
+
 # Asynchronous programming packages.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 
-# Command line interface.
+# Command line interface and configuration.
 clap = { version = "4", features = ["derive"] }
-
-# Asset management.
-fontdb = { version = "0.15", features = ["memmap", "fontconfig"] }
+toml = { version = "0.8" }
 
 # Language server protocol.
 tower-lsp = { version = "0.20.0", features = ["proposed"] }
@@ -35,7 +36,13 @@ log = { version = "0.4" }
 structured-logger = { version = "1" }
 
 # Telemetry dependencies.
+serde = "1"
+serde_json = "1"
 opentelemetry = { version = "0.20.0", optional = true }
+opentelemetry-otlp = { version = "0.13.0", optional = true }
+tracing = "0.1.34"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
 tracing-opentelemetry = { version = "0.21.0", optional = true }
 
 # Typst packages.
@@ -45,4 +52,8 @@ typst-ide = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
 typst-pdf = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
 
 [features]
-telemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
+telemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
