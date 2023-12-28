@@ -1,21 +1,26 @@
-use std::cell::OnceCell;
-use std::env;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use typst::eval::Tracer;
 
 use comemo::Prehashed;
 use fontdb;
 use fontdb::Database;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
+use typst::model::Document;
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::{Library, World};
+use typst_ide::autocomplete;
 
+#[derive(Debug)]
 pub struct LazyFont {
     path: PathBuf,
     index: u32,
-    font: OnceCell<Option<Font>>,
+    font: OnceLock<Option<Font>>,
 }
 
 impl LazyFont {
@@ -29,6 +34,9 @@ impl LazyFont {
     }
 }
 
+/// We should make an assumption that each instance of World corresponds to a
+/// specific main fail (=target).
+#[derive(Debug)]
 pub struct LanguageServiceWorld {
     /// Typst's standard library.
     library: Prehashed<Library>,
@@ -36,6 +44,12 @@ pub struct LanguageServiceWorld {
     book: Prehashed<FontBook>,
     /// Locations of and storage for lazily loaded fonts.
     fonts: Vec<LazyFont>,
+    /// Source files.
+    sources: HashMap<PathBuf, String>,
+    /// Path to main file (usually `main.typ`).
+    main_path: Option<PathBuf>,
+    /// Result of compilation.
+    document: Arc<Document>,
 }
 
 impl LanguageServiceWorld {
@@ -61,7 +75,7 @@ impl LanguageServiceWorld {
                 fonts.push(LazyFont {
                     path: path.clone(),
                     index: face.index,
-                    font: OnceCell::new(),
+                    font: Default::default(),
                 });
             }
         }
@@ -69,7 +83,56 @@ impl LanguageServiceWorld {
             library: Prehashed::new(Library::build()),
             book: Prehashed::new(book),
             fonts: fonts,
+            sources: HashMap::new(),
+            main_path: None,
+            document: Default::default(),
         })
+    }
+
+    pub fn add_file(&mut self, path: &Path, text: String) {
+        self.sources.insert(path.to_path_buf(), text);
+    }
+
+    pub fn add_main_file(&mut self, path: &Path, text: String) {
+        self.main_path = Some(path.to_path_buf());
+        self.add_file(path, text)
+    }
+
+    pub fn compile(&mut self) {
+        let mut tracer = Tracer::new();
+        let result = typst::compile(self, &mut tracer);
+        match result {
+            Ok(doc) => {
+                log::info!("compiled successfully");
+                let buffer = typst_pdf::pdf(&doc, None, None);
+                let _ = fs::write("main.pdf", buffer).map_err(|err| {
+                    println!("failed to write PDF file ({err})")
+                });
+                // Save compiled document in execution context.
+                self.document = Arc::new(doc);
+            }
+            Err(diag) => {
+                let fst = diag.first().unwrap();
+                log::warn!("failed to compile: {}", fst.message)
+            }
+        }
+    }
+
+    pub fn complete(&mut self, pos: usize) -> Vec<String> {
+        let source = self.main();
+        let result = autocomplete(
+            self,
+            Some(self.document.as_ref()),
+            &source,
+            pos,
+            false,
+        );
+        match result {
+            Some((_, items)) => {
+                items.iter().map(|el| el.label.to_string()).collect()
+            }
+            None => vec![],
+        }
     }
 }
 
@@ -91,11 +154,18 @@ impl World for LanguageServiceWorld {
     /// Access the main source file.
     fn main(&self) -> Source {
         println!("main()");
-        let root_dir = env::current_dir().unwrap_or_default();
-        let full_path = root_dir.join(Path::new("main.typ"));
-        let path = VirtualPath::within_root(&full_path, &root_dir).unwrap();
-        let id = FileId::new(None, path);
-        let body = fs::read(full_path).unwrap();
+        let main_path = match &self.main_path {
+            Some(path) => path.as_path(),
+            None => panic!("no path to main file"),
+        };
+
+        // Make FileID (an internal identifier for a file in Typst).
+        let root_dir = main_path.parent().unwrap();
+        let vpath = VirtualPath::within_root(&main_path, &root_dir).unwrap();
+        let id = FileId::new(None, vpath);
+
+        // Read file content, decode and return it as a source.
+        let body = fs::read(main_path).unwrap();
         let text = String::from_utf8(body).unwrap();
         Source::new(id, text)
     }

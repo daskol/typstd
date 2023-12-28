@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use serde::Deserialize;
 
@@ -13,6 +13,8 @@ use tracing_subscriber::{
     fmt, layer::SubscriberExt, util::SubscriberInitExt, util::TryInitError,
     EnvFilter,
 };
+
+use typstd::LanguageServiceWorld;
 
 #[derive(Debug, Deserialize)]
 struct TypstDocument {
@@ -60,6 +62,8 @@ fn import_targets(root_dir: &Path) -> std::result::Result<Vec<Target>, String> {
 #[derive(Debug)]
 struct TypstLanguageService {
     root_uris: RwLock<Vec<Url>>,
+    /// Actual execution context for language analysis.
+    world: Mutex<LanguageServiceWorld>,
 }
 
 #[tower_lsp::async_trait]
@@ -163,11 +167,23 @@ impl LanguageServer for TypstLanguageService {
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        // TODO: Find context (world) by file and evalute the context.
         log::info!(
             "open {} as {}",
             params.text_document.uri,
             params.text_document.language_id
         );
+
+        let path = params.text_document.uri.path();
+        let text = params.text_document.text;
+        log::info!("add {} as a main file", path);
+        self.world
+            .lock()
+            .unwrap()
+            .add_main_file(Path::new(path), text);
+
+        log::info!("try to compile {}", path);
+        self.world.lock().unwrap().compile()
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
@@ -201,7 +217,18 @@ impl LanguageServer for TypstLanguageService {
             params.text_document_position.position.line,
             params.text_document_position.position.character,
         );
-        Ok(None)
+        let labels = self.world.lock().unwrap().complete(1);
+        if labels.is_empty() {
+            return Ok(None);
+        }
+        let items = labels
+            .iter()
+            .map(|el| CompletionItem {
+                label: el.clone(),
+                ..Default::default()
+            })
+            .collect();
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 
@@ -275,6 +302,7 @@ pub async fn main() {
         let stdout = tokio::io::stdout();
         let (service, socket) = LspService::new(|_| TypstLanguageService {
             root_uris: RwLock::new(vec![]),
+            world: LanguageServiceWorld::new().unwrap().into(), // TODO
         });
         Server::new(stdin, stdout, socket).serve(service).await;
     };
