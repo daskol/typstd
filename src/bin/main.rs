@@ -13,6 +13,7 @@ use tracing_subscriber::{
     fmt, layer::SubscriberExt, util::SubscriberInitExt, util::TryInitError,
     EnvFilter,
 };
+use typst_ide::CompletionKind;
 
 use typstd::LanguageServiceWorld;
 
@@ -212,19 +213,36 @@ impl LanguageServer for TypstLanguageService {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        log::info!(
-            "complete at {}:{}",
-            params.text_document_position.position.line,
-            params.text_document_position.position.character,
-        );
-        let labels = self.world.lock().unwrap().complete(1);
+        let position = params.text_document_position.position;
+        log::info!("complete at {}:{}", position.line, position.character);
+        // TODO: Get source by URI.
+        let labels = self
+            .world
+            .lock()
+            .unwrap()
+            .complete(position.line as usize, position.character as usize);
         if labels.is_empty() {
             return Ok(None);
         }
         let items = labels
             .iter()
             .map(|el| CompletionItem {
-                label: el.clone(),
+                label: el.label.clone(),
+                kind: Some(match el.kind {
+                    CompletionKind::Func => CompletionItemKind::FUNCTION,
+                    CompletionKind::Syntax => CompletionItemKind::SNIPPET,
+                    CompletionKind::Type => CompletionItemKind::CLASS,
+                    CompletionKind::Param => CompletionItemKind::VALUE,
+                    CompletionKind::Constant => CompletionItemKind::CONSTANT,
+                    // There is no suitable category for symbols (like
+                    // dot.circle) in language server protocol. So we decided
+                    // to map `Symbol` to `EnumMember` since set of all
+                    // symbols are is bounded and we can say that all symbols
+                    // constitutes some big enumeration. ¯\_(ツ)_/¯
+                    CompletionKind::Symbol(_) => {
+                        CompletionItemKind::ENUM_MEMBER
+                    }
+                }),
                 ..Default::default()
             })
             .collect();

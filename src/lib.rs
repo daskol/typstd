@@ -3,18 +3,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use typst::eval::Tracer;
 
 use comemo::Prehashed;
 use fontdb;
 use fontdb::Database;
 use typst::diag::{FileError, FileResult};
+use typst::eval::Tracer;
 use typst::foundations::{Bytes, Datetime};
 use typst::model::Document;
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::{Library, World};
 use typst_ide::autocomplete;
+use typst_ide::CompletionKind;
+
+pub struct CompletionItem {
+    pub label: String,
+    pub kind: CompletionKind,
+}
 
 #[derive(Debug)]
 pub struct LazyFont {
@@ -32,6 +38,42 @@ impl LazyFont {
             })
             .clone()
     }
+}
+
+fn add_embedded_fonts(book: &mut FontBook, fonts: &mut Vec<LazyFont>) {
+    let mut process = |bytes: &'static [u8]| {
+        let buffer = typst::foundations::Bytes::from_static(bytes);
+        for (i, font) in Font::iter(buffer).enumerate() {
+            book.push(font.info().clone());
+            fonts.push(LazyFont {
+                path: PathBuf::new(),
+                index: i as u32,
+                font: OnceLock::from(Some(font)),
+            });
+        }
+    };
+
+    macro_rules! add {
+        ($filename:literal) => {
+            process(include_bytes!(concat!("../assets/fonts/", $filename)));
+        };
+    }
+
+    // Embed default fonts.
+    add!("LinLibertine_R.ttf");
+    add!("LinLibertine_RB.ttf");
+    add!("LinLibertine_RBI.ttf");
+    add!("LinLibertine_RI.ttf");
+    add!("NewCMMath-Book.otf");
+    add!("NewCMMath-Regular.otf");
+    add!("NewCM10-Regular.otf");
+    add!("NewCM10-Bold.otf");
+    add!("NewCM10-Italic.otf");
+    add!("NewCM10-BoldItalic.otf");
+    add!("DejaVuSansMono.ttf");
+    add!("DejaVuSansMono-Bold.ttf");
+    add!("DejaVuSansMono-Oblique.ttf");
+    add!("DejaVuSansMono-BoldOblique.ttf");
 }
 
 /// We should make an assumption that each instance of World corresponds to a
@@ -57,8 +99,9 @@ impl LanguageServiceWorld {
         let mut db = Database::new();
         db.load_system_fonts();
 
-        let mut fonts = Vec::<LazyFont>::new();
         let mut book = FontBook::new();
+        let mut fonts = Vec::<LazyFont>::new();
+        add_embedded_fonts(&mut book, &mut fonts);
         for (_, face) in db.faces().enumerate() {
             let path = match &face.source {
                 fontdb::Source::Binary(_) => continue,
@@ -118,8 +161,16 @@ impl LanguageServiceWorld {
         }
     }
 
-    pub fn complete(&mut self, pos: usize) -> Vec<String> {
+    pub fn complete(
+        &mut self,
+        line: usize,
+        column: usize,
+    ) -> Vec<CompletionItem> {
         let source = self.main();
+        let pos = match source.line_column_to_byte(line, column) {
+            Some(pos) => pos,
+            None => return vec![],
+        };
         let result = autocomplete(
             self,
             Some(self.document.as_ref()),
@@ -128,9 +179,13 @@ impl LanguageServiceWorld {
             false,
         );
         match result {
-            Some((_, items)) => {
-                items.iter().map(|el| el.label.to_string()).collect()
-            }
+            Some((_, items)) => items
+                .iter()
+                .map(|el| CompletionItem {
+                    label: el.label.to_string(),
+                    kind: el.kind.clone(),
+                })
+                .collect(),
             None => vec![],
         }
     }
