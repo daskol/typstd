@@ -131,13 +131,28 @@ impl LanguageServiceWorld {
                 });
             }
         }
+
+        // Read main file or fail.
+        let vpath = VirtualPath::within_root(main_path, root_dir)?;
+        let file_id = FileId::new(None, vpath);
+        let source = match fs::read(main_path) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .ok()
+                .map(|text| Source::new(file_id, text)),
+            Err(_) => None,
+        }?;
+        let sources = HashMap::<PathBuf, Source>::from([(
+            main_path.to_path_buf(),
+            source,
+        )]);
+
         Some(Self {
             root_dir: root_dir.to_path_buf(),
             main_path: main_path.to_path_buf(),
             library: Prehashed::new(Library::build()),
             book: Prehashed::new(book),
             fonts: fonts,
-            sources: HashMap::new().into(),
+            sources: sources.into(),
             document: Default::default(),
         })
     }
