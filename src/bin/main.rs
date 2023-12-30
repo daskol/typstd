@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 
 use serde::Deserialize;
@@ -34,6 +36,8 @@ struct TypstProject {
     package: Option<TypstPackage>,
 }
 
+/// Target represents a compilation target for a particular main file located
+/// at specific root directory.
 struct Target {
     root_dir: PathBuf,
     main_file: PathBuf,
@@ -62,9 +66,29 @@ fn import_targets(root_dir: &Path) -> std::result::Result<Vec<Target>, String> {
 
 #[derive(Debug)]
 struct TypstLanguageService {
-    root_uris: RwLock<Vec<Url>>,
-    /// Actual execution context for language analysis.
-    world: Mutex<LanguageServiceWorld>,
+    /// Actual execution contexts for language analysis. It would be better to
+    /// use URI as keys instead of paths if we want non-local environment such
+    /// as browsers.
+    worlds: RwLock<HashMap<PathBuf, Arc<Mutex<LanguageServiceWorld>>>>,
+}
+
+impl TypstLanguageService {
+    /// Find the closest parent URI for the specified one.
+    fn find_world(
+        &self,
+        uri: &Url,
+    ) -> Option<Arc<Mutex<LanguageServiceWorld>>> {
+        let path = Path::new(uri.path());
+        let worlds = self.worlds.read().unwrap();
+        // Is it better to use trie or something like that?
+        while let Some(path) = path.parent() {
+            match worlds.get(path) {
+                Some(world) => return Some(world.clone()),
+                None => continue,
+            }
+        }
+        None
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -82,34 +106,47 @@ impl LanguageServer for TypstLanguageService {
             serde_json::to_string(&params).unwrap()
         );
 
+        let mut root_uris = Vec::<Url>::new();
         if let Some(folders) = params.workspace_folders {
-            self.root_uris
-                .write()
-                .unwrap()
-                .extend(folders.iter().map(|folder| folder.uri.clone()));
+            root_uris.extend(folders.iter().map(|folder| folder.uri.clone()));
         } else if let Some(root_uri) = params.root_uri {
-            self.root_uris.write().unwrap().push(root_uri);
+            root_uris.push(root_uri);
         } else {
             // TODO: Use current directory?
             log::warn!("there is not root workspace")
         }
 
-        if let Some(root_uri) = self.root_uris.read().unwrap().first() {
-            log::info!(
-                "init language server at workspace {} (total {} folders)",
-                root_uri,
-                self.root_uris.read().unwrap().len()
-            );
+        tracing::info!("try to load workspace configuration from typst.toml");
+        let mut targets = Vec::<Target>::new();
+        for root_uri in root_uris.iter() {
+            let Ok(new_targets) = import_targets(Path::new(root_uri.path()))
+            else {
+                log::warn!("failed to import targets from {}", root_uri);
+                continue;
+            };
+            targets.extend(new_targets);
         }
 
-        tracing::info!("try to load workspace configuration from typst.toml");
-        for root_uri in self.root_uris.read().unwrap().iter() {
-            let targets = import_targets(&PathBuf::from(root_uri.path()));
-            if let Ok(targets) = targets {
-                for target in targets.iter() {
-                    tracing::info!("import target {:?}", target.main_file);
+        for ent in targets.iter() {
+            match LanguageServiceWorld::new(&ent.root_dir, &ent.main_file) {
+                Some(world) => {
+                    log::error!(
+                        "initialize world for {:?} at {:?}",
+                        ent.main_file,
+                        ent.root_dir,
+                    );
+                    let world = Mutex::new(world);
+                    self.worlds
+                        .write()
+                        .unwrap()
+                        .insert(ent.root_dir.clone(), world.into());
                 }
-            }
+                None => log::error!(
+                    "failed to initialize world for {:?} at {:?}",
+                    ent.main_file,
+                    ent.root_dir,
+                ),
+            };
         }
 
         Ok(InitializeResult {
@@ -173,7 +210,10 @@ impl LanguageServer for TypstLanguageService {
             };
             let begin = range.start;
             let end = range.end;
-            self.world.lock().unwrap().update_file(
+            let Some(world) = self.find_world(&uri) else {
+                continue;
+            };
+            world.lock().unwrap().update_file(
                 Path::new(uri.path()),
                 change.text.as_str(),
                 (begin.line as usize, begin.character as usize),
@@ -191,50 +231,47 @@ impl LanguageServer for TypstLanguageService {
             params.text_document.language_id
         );
 
-        // TODO: (1) find a root directory.
+        // It seems that there is a data race in sense that we are trying to
+        // create a new world non-atomically. This means that a concurrent
+        // call can create a new world faster.
         let uri = params.text_document.uri;
         let path = Path::new(uri.path());
-        let mut root_uri: Option<Url> = None;
-        while let Some(path) = path.parent() {
-            root_uri = self
-                .root_uris
-                .read()
-                .unwrap()
-                .iter()
-                .find(|&dir| Path::new(dir.path()) == path)
-                .cloned();
-            if root_uri.is_some() {
-                break;
+        let world = match self.find_world(&uri) {
+            Some(world) => world.clone(),
+            None => {
+                let Some(root_dir) = path.parent() else {
+                    log::error!("there is no root directory for {:?}", path);
+                    return;
+                };
+                let world = LanguageServiceWorld::new(root_dir, path);
+                match world {
+                    Some(world) => {
+                        let world = Arc::new(Mutex::new(world));
+                        self.worlds
+                            .write()
+                            .unwrap()
+                            .insert(root_dir.to_path_buf(), world.clone());
+                        world
+                    }
+                    None => {
+                        log::error!(
+                            "failed to create new world from scratch for {:?}",
+                            path
+                        );
+                        return;
+                    }
+                }
             }
-        }
-
-        // TODO: If there is no root URI the create new root and new context.
-        if root_uri.is_none() {
-            log::error!("no root uri for document at {}", uri);
-            return;
-        }
-
-        // TODO: (2) find an execution context (aka World).
-        let Some(filename) = path.file_name() else {
-            log::error!("there is not a file at {}", uri);
-            return;
         };
-        if filename == "main.typ" {
-            log::info!("add {:?} as a main file", path);
-            self.world
-                .lock()
-                .unwrap()
-                .add_main_file(Path::new(path), params.text_document.text);
-        } else {
-            log::info!("add {:?} as a regular file", path);
-            self.world
-                .lock()
-                .unwrap()
-                .add_file(Path::new(path), params.text_document.text);
-        }
+
+        log::info!("find world {:?} at ...", path);
+        world
+            .lock()
+            .unwrap()
+            .add_file(path, params.text_document.text);
 
         log::info!("try to compile document");
-        self.world.lock().unwrap().compile()
+        world.lock().unwrap().compile();
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
@@ -268,9 +305,15 @@ impl LanguageServer for TypstLanguageService {
 
         let uri = params.text_document_position.text_document.uri;
         let path = Path::new(uri.path());
-        // TODO: Get a world by uri.
+        let world = match self.find_world(&uri) {
+            Some(world) => world,
+            None => {
+                log::error!("unable to find a world for completion");
+                return Ok(None);
+            }
+        };
 
-        let labels = self.world.lock().unwrap().complete(
+        let labels = world.lock().unwrap().complete(
             path,
             position.line as usize,
             position.character as usize,
@@ -373,8 +416,7 @@ pub async fn main() {
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
         let (service, socket) = LspService::new(|_| TypstLanguageService {
-            root_uris: RwLock::new(vec![]),
-            world: LanguageServiceWorld::new().unwrap().into(), // TODO
+            worlds: Default::default(),
         });
         Server::new(stdin, stdout, socket).serve(service).await;
     };

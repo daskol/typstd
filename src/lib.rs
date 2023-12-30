@@ -82,6 +82,10 @@ fn add_embedded_fonts(book: &mut FontBook, fonts: &mut Vec<LazyFont>) {
 /// specific main fail (=target).
 #[derive(Debug)]
 pub struct LanguageServiceWorld {
+    /// Path to a root directory. All source files are relative to it.
+    root_dir: PathBuf,
+    /// Path to main file (usually `main.typ`).
+    main_path: PathBuf,
     /// Typst's standard library.
     library: Prehashed<Library>,
     /// Metadata about discovered fonts.
@@ -90,14 +94,17 @@ pub struct LanguageServiceWorld {
     fonts: Vec<LazyFont>,
     /// Source files.
     sources: RefCell<HashMap<PathBuf, Source>>,
-    /// Path to main file (usually `main.typ`).
-    main_path: Option<PathBuf>,
     /// Result of compilation.
     document: Arc<Document>,
 }
 
 impl LanguageServiceWorld {
-    pub fn new() -> Option<LanguageServiceWorld> {
+    /// Create an evaluation context with main source file `main_path` and all
+    /// files located at `root_dir`.
+    pub fn new(
+        root_dir: &Path,
+        main_path: &Path,
+    ) -> Option<LanguageServiceWorld> {
         let mut db = Database::new();
         db.load_system_fonts();
 
@@ -125,11 +132,12 @@ impl LanguageServiceWorld {
             }
         }
         Some(Self {
+            root_dir: root_dir.to_path_buf(),
+            main_path: main_path.to_path_buf(),
             library: Prehashed::new(Library::build()),
             book: Prehashed::new(book),
             fonts: fonts,
             sources: HashMap::new().into(),
-            main_path: None,
             document: Default::default(),
         })
     }
@@ -146,11 +154,6 @@ impl LanguageServiceWorld {
         let source = Source::new(id, text);
 
         self.sources.borrow_mut().insert(path.to_path_buf(), source);
-    }
-
-    pub fn add_main_file(&mut self, path: &Path, text: String) {
-        self.main_path = Some(path.to_path_buf());
-        self.add_file(path, text)
     }
 
     fn read_source(&self, path: &Path, id: FileId) -> FileResult<Source> {
@@ -264,11 +267,7 @@ impl World for LanguageServiceWorld {
     /// Access the main source file.
     fn main(&self) -> Source {
         log::info!("main(): access to main file: uri={:?}", self.main_path);
-        let main_path = match &self.main_path {
-            Some(path) => path.as_path(),
-            None => panic!("no path to main file"),
-        };
-        self.sources.borrow().get(main_path).unwrap().clone()
+        self.sources.borrow().get(&self.main_path).unwrap().clone()
     }
 
     /// Try to access the specified source file.
@@ -280,9 +279,7 @@ impl World for LanguageServiceWorld {
 
         // Get a real path from FileID (an internal identifier for a file
         // in Typst).
-        let main_path = self.main_path.clone().unwrap();
-        let root_dir = main_path.parent().unwrap();
-        let path = root_dir.join(id.vpath().as_rootless_path());
+        let path = self.root_dir.join(id.vpath().as_rootless_path());
         log::info!("source(): look up a source with id={:?} at {:?}", id, path);
 
         // Look up a source by its absolute path.
@@ -306,17 +303,7 @@ impl World for LanguageServiceWorld {
                 Err(FileError::NotFound(PathBuf::new()))
             }
             None => {
-                let Some(main_path) = self.main_path.clone() else {
-                    return Err(FileError::Other(Some(
-                        "missing main path".into(),
-                    )));
-                };
-                let Some(root_dir) = main_path.parent() else {
-                    return Err(FileError::NotFound(
-                        id.vpath().as_rootless_path().to_path_buf(),
-                    ));
-                };
-                let path = root_dir.join(id.vpath().as_rootless_path());
+                let path = self.root_dir.join(id.vpath().as_rootless_path());
                 match fs::read(&path) {
                     Ok(bytes) => Ok(Bytes::from(bytes)),
                     Err(_) => Err(FileError::NotFound(path.to_path_buf())),
