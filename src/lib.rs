@@ -269,13 +269,11 @@ impl World for LanguageServiceWorld {
     ///
     /// Can be created through `Library::build()`.
     fn library(&self) -> &Prehashed<Library> {
-        log::info!("library()");
         &self.library
     }
 
     /// Metadata about all known fonts.
     fn book(&self) -> &Prehashed<FontBook> {
-        log::info!("book()");
         &self.book
     }
 

@@ -26,14 +26,14 @@ struct TypstDocument {
 
 #[derive(Debug, Deserialize)]
 struct TypstPackage {
-    entrypoint: String,
+    _entrypoint: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct TypstProject {
     #[serde(rename = "document")]
     documents: Vec<TypstDocument>,
-    package: Option<TypstPackage>,
+    _package: Option<TypstPackage>,
 }
 
 /// Target represents a compilation target for a particular main file located
@@ -185,11 +185,14 @@ impl LanguageServer for TypstLanguageService {
         })
     }
 
-    #[instrument]
-    async fn initialized(&self, _params: InitializedParams) {}
+    #[instrument(skip_all)]
+    async fn initialized(&self, _params: InitializedParams) {
+        log::info!("language server client is initialized");
+    }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn shutdown(&self) -> Result<()> {
+        log::info!("shutdown language server");
         Ok(())
     }
 
@@ -366,7 +369,7 @@ fn set_up_logging() -> std::result::Result<(), TryInitError> {
     // Parse an `EnvFilter` configuration from the `RUST_LOG`
     // environment variable.
     let filter = EnvFilter::from_env("TYPSTD_LOG")
-        .add_directive(tracing::Level::INFO.into());
+        .add_directive("typstd=info".parse().unwrap());
 
     // Use the tracing subscriber `Registry`, or any other subscriber
     // that impls `LookupSpan`
@@ -393,7 +396,7 @@ fn set_up_logging() -> std::result::Result<(), TryInitError> {
     // Parse an `EnvFilter` configuration from the `RUST_LOG`
     // environment variable.
     let filter = EnvFilter::from_env("TYPSTD_LOG")
-        .add_directive(tracing::Level::INFO.into());
+        .add_directive("typstd=info".parse().unwrap());
 
     // Use the tracing subscriber `Registry`, or any other subscriber
     // that impls `LookupSpan`
