@@ -45,6 +45,13 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
 tracing-opentelemetry = { version = "0.21.0", optional = true }
 
+# Typst package support.
+dirs = "5"
+env_proxy = "0.3"
+flate2 = "1"
+tar = "0.4"
+ureq = "2"
+
 # Typst packages.
 comemo = "0.3"
 typst = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }

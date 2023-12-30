@@ -19,6 +19,8 @@ use typst::{Library, World};
 use typst_ide::autocomplete;
 use typst_ide::CompletionKind;
 
+mod package;
+
 pub struct CompletionItem {
     pub label: String,
     pub kind: CompletionKind,
@@ -286,13 +288,25 @@ impl World for LanguageServiceWorld {
     /// Try to access the specified source file.
     fn source(&self, id: FileId) -> FileResult<Source> {
         log::info!("source(): request source with id={:?}", id);
-        if id.package().is_some() {
-            return Err(FileError::NotFound(PathBuf::new()));
-        }
+        let path = match id.package() {
+            Some(pkg) => {
+                // Get a root directory of the package.
+                let version = pkg.version.to_string();
+                let pkg_dir = package::prepare_package(&pkg.name, &version)
+                    .map_err(|err| {
+                        FileError::Other(Some(
+                            format!("package failure: {err}").into(),
+                        ))
+                    })?;
+
+                // Make a path which is relative to a package root.
+                pkg_dir.join(id.vpath().as_rootless_path())
+            }
+            None => self.root_dir.join(id.vpath().as_rootless_path()),
+        };
 
         // Get a real path from FileID (an internal identifier for a file
         // in Typst).
-        let path = self.root_dir.join(id.vpath().as_rootless_path());
         log::info!("source(): look up a source with id={:?} at {:?}", id, path);
 
         // Look up a source by its absolute path.
@@ -311,9 +325,22 @@ impl World for LanguageServiceWorld {
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         log::info!("file(): request file with id={:?} ", id);
         match id.package() {
-            Some(package) => {
-                log::info!("(package={}; vpath={:?})", package, id.vpath());
-                Err(FileError::NotFound(PathBuf::new()))
+            Some(pkg) => {
+                // Get a root directory of the package.
+                let version = pkg.version.to_string();
+                let pkg_dir = package::prepare_package(&pkg.name, &version)
+                    .map_err(|err| {
+                        FileError::Other(Some(
+                            format!("package failure: {err}").into(),
+                        ))
+                    })?;
+
+                // Read a file which is located at package root.
+                let path = pkg_dir.join(id.vpath().as_rootless_path());
+                match fs::read(&path) {
+                    Ok(bytes) => Ok(Bytes::from(bytes)),
+                    Err(_) => Err(FileError::NotFound(path.to_path_buf())),
+                }
             }
             None => {
                 let path = self.root_dir.join(id.vpath().as_rootless_path());
