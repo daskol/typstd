@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
+use std::time::Instant;
 
 use serde::Deserialize;
 
@@ -78,14 +79,17 @@ impl TypstLanguageService {
         &self,
         uri: &Url,
     ) -> Option<Arc<Mutex<LanguageServiceWorld>>> {
-        let path = Path::new(uri.path());
+        let mut path = Path::new(uri.path());
         let worlds = self.worlds.read().unwrap();
         // Is it better to use trie or something like that?
-        while let Some(path) = path.parent() {
-            match worlds.get(path) {
+        while let Some(parent) = path.parent() {
+            log::info!("look at {:?} path", path);
+            match worlds.get(parent) {
                 Some(world) => return Some(world.clone()),
-                None => continue,
-            }
+                None => {
+                    path = parent;
+                }
+            };
         }
         None
     }
@@ -119,18 +123,20 @@ impl LanguageServer for TypstLanguageService {
         tracing::info!("try to load workspace configuration from typst.toml");
         let mut targets = Vec::<Target>::new();
         for root_uri in root_uris.iter() {
-            let Ok(new_targets) = import_targets(Path::new(root_uri.path()))
-            else {
-                log::warn!("failed to import targets from {}", root_uri);
-                continue;
+            match import_targets(Path::new(root_uri.path())) {
+                Ok(new_targets) => targets.extend(new_targets),
+                Err(err) => log::warn!(
+                    "failed to import targets from {}: {}",
+                    root_uri,
+                    err
+                ),
             };
-            targets.extend(new_targets);
         }
 
         for ent in targets.iter() {
             match LanguageServiceWorld::new(&ent.root_dir, &ent.main_file) {
                 Some(world) => {
-                    log::error!(
+                    log::info!(
                         "initialize world for {:?} at {:?}",
                         ent.main_file,
                         ent.root_dir,
@@ -214,7 +220,7 @@ impl LanguageServer for TypstLanguageService {
             let begin = range.start;
             let end = range.end;
             let Some(world) = self.find_world(&uri) else {
-                continue;
+                return;
             };
             world.lock().unwrap().update_file(
                 Path::new(uri.path()),
@@ -223,6 +229,15 @@ impl LanguageServer for TypstLanguageService {
                 (end.line as usize, end.character as usize),
             );
         }
+
+        log::info!("try to compile document");
+        let Some(world) = self.find_world(&uri) else {
+            return;
+        };
+        let started_at = Instant::now();
+        world.lock().unwrap().compile();
+        let elapsed = started_at.elapsed();
+        log::info!("compilation finished in {:?}", elapsed);
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
@@ -274,7 +289,10 @@ impl LanguageServer for TypstLanguageService {
             .add_file(path, params.text_document.text);
 
         log::info!("try to compile document");
+        let started_at = Instant::now();
         world.lock().unwrap().compile();
+        let elapsed = started_at.elapsed();
+        log::info!("compilation finished in {:?}", elapsed);
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
