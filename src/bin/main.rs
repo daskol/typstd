@@ -164,6 +164,22 @@ impl LanguageServer for TypstLanguageService {
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         log::info!("apply {} changes", params.content_changes.len());
+        // TODO: (1) find a context by URI; (2) trigger an update of that
+        // source within Context(?).
+        let uri = params.text_document.uri;
+        for change in params.content_changes.iter() {
+            let Some(range) = change.range else {
+                continue;
+            };
+            let begin = range.start;
+            let end = range.end;
+            self.world.lock().unwrap().update_file(
+                Path::new(uri.path()),
+                change.text.as_str(),
+                (begin.line as usize, begin.character as usize),
+                (end.line as usize, end.character as usize),
+            );
+        }
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
