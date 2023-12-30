@@ -191,15 +191,49 @@ impl LanguageServer for TypstLanguageService {
             params.text_document.language_id
         );
 
-        let path = params.text_document.uri.path();
-        let text = params.text_document.text;
-        log::info!("add {} as a main file", path);
-        self.world
-            .lock()
-            .unwrap()
-            .add_main_file(Path::new(path), text);
+        // TODO: (1) find a root directory.
+        let uri = params.text_document.uri;
+        let path = Path::new(uri.path());
+        let mut root_uri: Option<Url> = None;
+        while let Some(path) = path.parent() {
+            root_uri = self
+                .root_uris
+                .read()
+                .unwrap()
+                .iter()
+                .find(|&dir| Path::new(dir.path()) == path)
+                .cloned();
+            if root_uri.is_some() {
+                break;
+            }
+        }
 
-        log::info!("try to compile {}", path);
+        // TODO: If there is no root URI the create new root and new context.
+        if root_uri.is_none() {
+            log::error!("no root uri for document at {}", uri);
+            return;
+        }
+
+        // TODO: (2) find an execution context (aka World).
+        let Some(filename) = path.file_name() else {
+            log::error!("there is not a file at {}", uri);
+            return;
+        };
+        if filename == "main.typ" {
+            log::info!("add {:?} as a main file", path);
+            self.world
+                .lock()
+                .unwrap()
+                .add_main_file(Path::new(path), params.text_document.text);
+        } else {
+            log::info!("add {:?} as a regular file", path);
+            self.world
+                .lock()
+                .unwrap()
+                .add_file(Path::new(path), params.text_document.text);
+        }
+
+        log::info!("try to compile document");
         self.world.lock().unwrap().compile()
     }
 
@@ -231,12 +265,16 @@ impl LanguageServer for TypstLanguageService {
     ) -> Result<Option<CompletionResponse>> {
         let position = params.text_document_position.position;
         log::info!("complete at {}:{}", position.line, position.character);
-        // TODO: Get source by URI.
-        let labels = self
-            .world
-            .lock()
-            .unwrap()
-            .complete(position.line as usize, position.character as usize);
+
+        let uri = params.text_document_position.text_document.uri;
+        let path = Path::new(uri.path());
+        // TODO: Get a world by uri.
+
+        let labels = self.world.lock().unwrap().complete(
+            path,
+            position.line as usize,
+            position.character as usize,
+        );
         if labels.is_empty() {
             return Ok(None);
         }

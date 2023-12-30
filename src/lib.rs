@@ -160,6 +160,10 @@ impl LanguageServiceWorld {
             Ok(bytes) => String::from_utf8(bytes).map_or(
                 Err(FileError::InvalidUtf8),
                 |text| {
+                    log::info!(
+                        "source(): add source with id={:?} to cache",
+                        id
+                    );
                     let source = Source::new(id, text);
                     self.sources
                         .borrow_mut()
@@ -211,13 +215,16 @@ impl LanguageServiceWorld {
 
     pub fn complete(
         &mut self,
+        path: &Path,
         line: usize,
         column: usize,
     ) -> Vec<CompletionItem> {
-        let source = self.main();
-        let pos = match source.line_column_to_byte(line, column) {
-            Some(pos) => pos,
-            None => return vec![],
+        let Some(source) = self.sources.borrow().get(path).cloned() else {
+            return vec![];
+        };
+
+        let Some(pos) = source.line_column_to_byte(line, column) else {
+            return vec![];
         };
         let result = autocomplete(
             self,
