@@ -1,13 +1,11 @@
 use std::collections::HashMap;
+use std::env;
 use std::error::Error;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::time::Instant;
-
-use serde::Deserialize;
 
 use clap::Parser;
 use tower_lsp::jsonrpc::Result;
@@ -18,52 +16,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, util::SubscriberInitExt, EnvFilter};
 use typst_ide::CompletionKind;
 
+use typstd::workspace::{search_targets, search_workspace};
 use typstd::LanguageServiceWorld;
-
-#[derive(Debug, Deserialize)]
-struct TypstDocument {
-    entrypoint: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TypstPackage {
-    _entrypoint: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TypstProject {
-    #[serde(rename = "document")]
-    documents: Vec<TypstDocument>,
-    _package: Option<TypstPackage>,
-}
-
-/// Target represents a compilation target for a particular main file located
-/// at specific root directory.
-struct Target {
-    root_dir: PathBuf,
-    main_file: PathBuf,
-}
-
-fn import_targets(root_dir: &Path) -> result::Result<Vec<Target>, String> {
-    let path = root_dir.join("typst.toml");
-    let bytes = fs::read(&path)
-        .map_err(|err| format!("failed to read {path:?}: {err}"))?;
-    let runes = std::str::from_utf8(&bytes)
-        .map_err(|err| format!("failed to decode utf-8 at {path:?}: {err}"))?;
-    let config = toml::from_str::<TypstProject>(runes)
-        .map_err(|err| format!("failed to parse toml at {path:?}: {err}"))?;
-
-    let targets = config
-        .documents
-        .iter()
-        .map(|doc| Target {
-            root_dir: root_dir.to_path_buf(),
-            main_file: root_dir.join(&doc.entrypoint),
-        })
-        .collect();
-
-    Ok(targets)
-}
 
 #[derive(Debug)]
 struct TypstLanguageService {
@@ -81,7 +35,7 @@ impl TypstLanguageService {
     /// Compile document and update user with compilation status.
     fn compile(&self, uri: &Url) -> result::Result<(), String> {
         log::info!("try to compile document");
-        let Some(world) = self.find_world(&uri) else {
+        let Some((_, world)) = self.find_world(&uri) else {
             return Err("missing compilation context".to_string());
         };
         let started_at = Instant::now();
@@ -103,20 +57,57 @@ impl TypstLanguageService {
     fn find_world(
         &self,
         uri: &Url,
-    ) -> Option<Arc<Mutex<LanguageServiceWorld>>> {
+    ) -> Option<(PathBuf, Arc<Mutex<LanguageServiceWorld>>)> {
         let mut path = Path::new(uri.path());
         let worlds = self.worlds.read().unwrap();
         // Is it better to use trie or something like that?
         while let Some(parent) = path.parent() {
-            log::info!("look at {:?} path", path);
             match worlds.get(parent) {
-                Some(world) => return Some(world.clone()),
+                Some(world) => {
+                    return Some((parent.to_path_buf(), world.clone()))
+                }
                 None => {
                     path = parent;
                 }
             };
         }
         None
+    }
+
+    fn new_world(
+        &self,
+        uri: &Url,
+    ) -> Option<(PathBuf, Arc<Mutex<LanguageServiceWorld>>)> {
+        let path = Path::new(uri.path());
+        let Some(root_dir) = path.parent() else {
+            log::error!("there is no root directory for {:?}", path);
+            return None;
+        };
+
+        // Search for workspace root (i.e. search for `typst.toml`) from the
+        // parent directory of the file to the filesystem hierarchy. If we
+        // found nothing then fallback to base directory of the file.
+        let root_dir = search_workspace(root_dir).unwrap_or(root_dir);
+
+        // Create a new world and insert it to world index.
+        match LanguageServiceWorld::new(root_dir, path) {
+            Some(world) => {
+                let root_dir = root_dir.to_path_buf();
+                let world = Arc::new(Mutex::new(world));
+                self.worlds
+                    .write()
+                    .unwrap()
+                    .insert(root_dir.clone(), world.clone());
+                Some((root_dir, world))
+            }
+            None => {
+                log::error!(
+                    "failed to create new world from scratch for {:?}",
+                    path
+                );
+                None
+            }
+        }
     }
 }
 
@@ -130,40 +121,51 @@ impl LanguageServer for TypstLanguageService {
         &self,
         params: InitializeParams,
     ) -> Result<InitializeResult> {
-        tracing::info!(
-            "initialize language server params={}",
-            serde_json::to_string(&params).unwrap()
-        );
+        // It is safe to unwrap since all keys and values are JSON
+        // serialiable.
+        let params_json = serde_json::to_string_pretty(&params).unwrap();
+        log::info!("initialize language server params={}", params_json);
 
         let mut root_uris = Vec::<Url>::new();
         if let Some(folders) = params.workspace_folders {
+            log::info!("use workspace folders for targets discovery");
             root_uris.extend(folders.iter().map(|folder| folder.uri.clone()));
         } else if let Some(root_uri) = params.root_uri {
+            log::info!("use obsolete root uri for targets discovery");
             root_uris.push(root_uri);
+        }
+
+        log::info!("try to load workspace configurations");
+        let root_dirs = if !root_uris.is_empty() {
+            root_uris
+                .iter()
+                .map(|uri| Path::new(uri.path()).to_path_buf())
+                .collect()
         } else {
-            // TODO: Use current directory?
-            log::warn!("there is not root workspace")
-        }
+            log::warn!("no root uris: fallback to current work directory");
+            env::current_dir().ok().map_or(vec![], |cwd| vec![cwd])
+        };
+        let root_dirs = root_dirs.iter().map(PathBuf::as_path).collect();
+        let targets = search_targets(root_dirs);
 
-        tracing::info!("try to load workspace configuration from typst.toml");
-        let mut targets = Vec::<Target>::new();
-        for root_uri in root_uris.iter() {
-            match import_targets(Path::new(root_uri.path())) {
-                Ok(new_targets) => targets.extend(new_targets),
-                Err(err) => log::warn!(
-                    "failed to import targets from {}: {}",
-                    root_uri,
-                    err
-                ),
+        log::info!("found {} target(s)", targets.len());
+        for (index, ent) in targets.iter().enumerate() {
+            let Some(relpath) = ent.main_file.strip_prefix(&ent.root_dir).ok()
+            else {
+                log::warn!(
+                    "[{}] main file {:?} is not descendant of {:?}: skip it",
+                    index,
+                    ent.root_dir,
+                    ent.main_file
+                );
+                continue;
             };
-        }
-
-        for ent in targets.iter() {
             match LanguageServiceWorld::new(&ent.root_dir, &ent.main_file) {
                 Some(world) => {
                     log::info!(
-                        "initialize world for {:?} at {:?}",
-                        ent.main_file,
+                        "[{}] initialize world for {:?} at {:?}",
+                        index,
+                        relpath,
                         ent.root_dir,
                     );
                     let world = Mutex::new(world);
@@ -173,8 +175,9 @@ impl LanguageServer for TypstLanguageService {
                         .insert(ent.root_dir.clone(), world.into());
                 }
                 None => log::error!(
-                    "failed to initialize world for {:?} at {:?}",
-                    ent.main_file,
+                    "[{}] failed to initialize world for {:?} at {:?}",
+                    index,
+                    relpath,
                     ent.root_dir,
                 ),
             };
@@ -227,12 +230,24 @@ impl LanguageServer for TypstLanguageService {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(uri = %params.text_document.uri))]
+    #[instrument(
+        skip_all,
+        fields(uri = %params.text_document.uri.path_segments()
+            .map(|it| it.last().unwrap_or("/"))
+            .unwrap_or("/")
+        )
+    )]
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         log::info!("close {}", params.text_document.uri);
     }
 
-    #[instrument(skip_all, fields(uri = %params.text_document.uri))]
+    #[instrument(
+        skip_all,
+        fields(uri = %params.text_document.uri.path_segments()
+            .map(|it| it.last().unwrap_or("/"))
+            .unwrap_or("/")
+        )
+    )]
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         log::info!("apply {} changes", params.content_changes.len());
         // TODO: (1) find a context by URI; (2) trigger an update of that
@@ -244,7 +259,7 @@ impl LanguageServer for TypstLanguageService {
             };
             let begin = range.start;
             let end = range.end;
-            let Some(world) = self.find_world(&uri) else {
+            let Some((_, world)) = self.find_world(&uri) else {
                 return;
             };
             world.lock().unwrap().update_file(
@@ -256,58 +271,45 @@ impl LanguageServer for TypstLanguageService {
         }
     }
 
-    #[instrument(skip_all, fields(uri = %params.text_document.uri))]
+    #[instrument(
+        skip_all,
+        fields(uri = %params.text_document.uri.path_segments()
+            .map(|it| it.last().unwrap_or("/"))
+            .unwrap_or("/")
+        )
+    )]
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        // TODO: Find context (world) by file and evalute the context.
-        log::info!(
-            "open {} as {}",
-            params.text_document.uri,
-            params.text_document.language_id
-        );
+        let lang_id = params.text_document.language_id;
+        let uri = params.text_document.uri;
+        log::info!("open {} text document {}", lang_id, uri);
 
         // It seems that there is a data race in sense that we are trying to
         // create a new world non-atomically. This means that a concurrent
         // call can create a new world faster.
-        let uri = params.text_document.uri;
         let path = Path::new(uri.path());
-        let world = match self.find_world(&uri) {
-            Some(world) => world.clone(),
-            None => {
-                let Some(root_dir) = path.parent() else {
-                    log::error!("there is no root directory for {:?}", path);
-                    return;
-                };
-                let world = LanguageServiceWorld::new(root_dir, path);
-                match world {
-                    Some(world) => {
-                        let world = Arc::new(Mutex::new(world));
-                        self.worlds
-                            .write()
-                            .unwrap()
-                            .insert(root_dir.to_path_buf(), world.clone());
-                        world
-                    }
-                    None => {
-                        log::error!(
-                            "failed to create new world from scratch for {:?}",
-                            path
-                        );
-                        return;
-                    }
-                }
-            }
+        let Some((root_dir, world)) =
+            self.find_world(&uri).or_else(|| self.new_world(&uri))
+        else {
+            log::error!("failed to find or initialize new world");
+            return;
         };
 
-        log::info!("find world {:?} at ...", path);
+        log::info!("found world rooted at {:?}", root_dir);
         let text = params.text_document.text;
         world.lock().unwrap().add_file(path, text);
         let _ = self.compile(&uri);
     }
 
-    #[instrument(skip_all, fields(uri = %params.text_document.uri))]
+    #[instrument(
+        skip_all,
+        fields(uri = %params.text_document.uri.path_segments()
+            .map(|it| it.last().unwrap_or("/"))
+            .unwrap_or("/")
+        )
+    )]
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
-        log::info!("save() {}", uri);
+        log::info!("save text document located at {}", uri);
         let Err(msg) = self.compile(&uri) else {
             self.client.publish_diagnostics(uri, vec![], None).await;
             return;
@@ -335,13 +337,18 @@ impl LanguageServer for TypstLanguageService {
 
     #[instrument(
         skip_all,
-        fields(uri = %params.text_document_position_params.text_document.uri),
+        fields(uri = %params.text_document_position_params.text_document.uri
+            .path_segments()
+            .map(|it| it.last().unwrap_or("/"))
+            .unwrap_or("/")
+        )
     )]
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         log::info!(
-            "hover at {}:{}",
+            "hover at {}:{} in {}",
             params.text_document_position_params.position.line,
             params.text_document_position_params.position.character,
+            params.text_document_position_params.text_document.uri,
         );
         Ok(None)
     }
@@ -360,7 +367,7 @@ impl LanguageServer for TypstLanguageService {
         let uri = params.text_document_position.text_document.uri;
         let path = Path::new(uri.path());
         let world = match self.find_world(&uri) {
-            Some(world) => world,
+            Some((_, world)) => world,
             None => {
                 log::error!("unable to find a world for completion");
                 return Ok(None);

@@ -4,6 +4,6 @@ version = "0.0.0"
 entrypoint = "main.typ"
 authors = ["Daniel Bershatsky <daniel.bershatsky@gmail.com>"]
 license = "MIT"
-description = "Plain and simple language server for Typst markup language."]
+description = "Plain and simple language server for Typst markup language."
 repository = "https://github.com/daskol/typstd"
 keywords = ["language-server", "languager-server-protocol", "lsp", "typst"]

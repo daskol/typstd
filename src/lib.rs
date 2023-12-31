@@ -19,7 +19,8 @@ use typst::{Library, World};
 use typst_ide::autocomplete;
 use typst_ide::CompletionKind;
 
-mod package;
+pub mod package;
+pub mod workspace;
 
 pub struct CompletionItem {
     pub label: String,
