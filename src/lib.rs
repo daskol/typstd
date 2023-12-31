@@ -213,10 +213,9 @@ impl LanguageServiceWorld {
         Some(source.edit(range, text))
     }
 
-    pub fn compile(&mut self) {
+    pub fn compile(&mut self) -> Result<(), String> {
         let mut tracer = Tracer::new();
-        let result = typst::compile(self, &mut tracer);
-        match result {
+        let result = match typst::compile(self, &mut tracer) {
             Ok(doc) => {
                 log::info!("compiled successfully");
                 let buffer = typst_pdf::pdf(&doc, None, None);
@@ -225,12 +224,18 @@ impl LanguageServiceWorld {
                 });
                 // Save compiled document in execution context.
                 self.document = Arc::new(doc);
+                Ok(())
             }
             Err(diag) => {
                 let fst = diag.first().unwrap();
-                log::warn!("failed to compile: {}", fst.message)
+                log::warn!("failed to compile: {}", fst.message);
+                Err("compilation failed".to_string())
             }
-        }
+        };
+        // Do some garbage collection sweeping out objectes older than N
+        // cycles (see typst-cli for details).
+        comemo::evict(10);
+        return result;
     }
 
     pub fn complete(

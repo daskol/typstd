@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::result;
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::time::Instant;
@@ -10,7 +11,7 @@ use serde::Deserialize;
 use clap::Parser;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use tower_lsp::{LanguageServer, LspService, Server};
+use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::instrument;
 use tracing_subscriber::{
     fmt, layer::SubscriberExt, util::SubscriberInitExt, util::TryInitError,
@@ -44,7 +45,7 @@ struct Target {
     main_file: PathBuf,
 }
 
-fn import_targets(root_dir: &Path) -> std::result::Result<Vec<Target>, String> {
+fn import_targets(root_dir: &Path) -> result::Result<Vec<Target>, String> {
     let path = root_dir.join("typst.toml");
     let bytes = fs::read(&path)
         .map_err(|err| format!("failed to read {path:?}: {err}"))?;
@@ -67,6 +68,10 @@ fn import_targets(root_dir: &Path) -> std::result::Result<Vec<Target>, String> {
 
 #[derive(Debug)]
 struct TypstLanguageService {
+    /// Language Server Protocol (LSP) client for backward communication with
+    /// service clients. Primarly, it is used for publishing diagnostics
+    /// information.
+    client: Client,
     /// Actual execution contexts for language analysis. It would be better to
     /// use URI as keys instead of paths if we want non-local environment such
     /// as browsers.
@@ -74,6 +79,27 @@ struct TypstLanguageService {
 }
 
 impl TypstLanguageService {
+    /// Compile document and update user with compilation status.
+    fn compile(&self, uri: &Url) -> result::Result<(), String> {
+        log::info!("try to compile document");
+        let Some(world) = self.find_world(&uri) else {
+            return Err("missing compilation context".to_string());
+        };
+        let started_at = Instant::now();
+        let result = world.lock().unwrap().compile();
+        let elapsed = started_at.elapsed();
+        match result {
+            Ok(_) => {
+                log::info!("compilation finished in {:?}", elapsed);
+                Ok(())
+            }
+            Err(err) => {
+                log::error!("compilation failed in {:?}: {}", elapsed, err);
+                Err(err)
+            }
+        }
+    }
+
     /// Find the closest parent URI for the specified one.
     fn find_world(
         &self,
@@ -229,15 +255,6 @@ impl LanguageServer for TypstLanguageService {
                 (end.line as usize, end.character as usize),
             );
         }
-
-        log::info!("try to compile document");
-        let Some(world) = self.find_world(&uri) else {
-            return;
-        };
-        let started_at = Instant::now();
-        world.lock().unwrap().compile();
-        let elapsed = started_at.elapsed();
-        log::info!("compilation finished in {:?}", elapsed);
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
@@ -283,21 +300,38 @@ impl LanguageServer for TypstLanguageService {
         };
 
         log::info!("find world {:?} at ...", path);
-        world
-            .lock()
-            .unwrap()
-            .add_file(path, params.text_document.text);
-
-        log::info!("try to compile document");
-        let started_at = Instant::now();
-        world.lock().unwrap().compile();
-        let elapsed = started_at.elapsed();
-        log::info!("compilation finished in {:?}", elapsed);
+        let text = params.text_document.text;
+        world.lock().unwrap().add_file(path, text);
+        let _ = self.compile(&uri);
     }
 
     #[instrument(skip_all, fields(uri = %params.text_document.uri))]
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        log::info!("save {}", params.text_document.uri);
+        let uri = params.text_document.uri;
+        log::info!("save() {}", uri);
+        let Err(msg) = self.compile(&uri) else {
+            self.client.publish_diagnostics(uri, vec![], None).await;
+            return;
+        };
+
+        // Handle compilation errors in a primitive way.
+        let pos = Position {
+            line: 0,
+            character: 0,
+        };
+        let diagnostic = Diagnostic {
+            range: Range {
+                start: pos,
+                end: pos,
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("typst".to_string()),
+            message: msg,
+            ..Default::default()
+        };
+        self.client
+            .publish_diagnostics(uri, vec![diagnostic], None)
+            .await;
     }
 
     #[instrument(
@@ -381,7 +415,7 @@ struct Args {
 }
 
 #[cfg(not(feature = "otel"))]
-fn set_up_logging() -> std::result::Result<(), TryInitError> {
+fn set_up_logging() -> result::Result<(), TryInitError> {
     let log_file = tracing_appender::rolling::never(".", "typstd.log");
 
     // Parse an `EnvFilter` configuration from the `RUST_LOG`
@@ -398,7 +432,7 @@ fn set_up_logging() -> std::result::Result<(), TryInitError> {
 }
 
 #[cfg(feature = "otel")]
-fn set_up_logging() -> std::result::Result<(), TryInitError> {
+fn set_up_logging() -> result::Result<(), TryInitError> {
     // TODO: Take value either from envvar or CLI argument.
     let log_file = tracing_appender::rolling::never(".", "typstd.log");
 
@@ -436,9 +470,11 @@ pub async fn main() {
     } else {
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
-        let (service, socket) = LspService::new(|_| TypstLanguageService {
-            worlds: Default::default(),
-        });
+        let (service, socket) =
+            LspService::new(|client| TypstLanguageService {
+                client: client,
+                worlds: Default::default(),
+            });
         Server::new(stdin, stdout, socket).serve(service).await;
     };
 }
