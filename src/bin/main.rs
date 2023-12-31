@@ -16,7 +16,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, util::SubscriberInitExt, EnvFilter};
 use typst_ide::CompletionKind;
 
-use typstd::workspace::{search_targets, search_workspace};
+use typstd::workspace::{search_targets, search_workspace, Target};
 use typstd::LanguageServiceWorld;
 
 #[derive(Debug)]
@@ -74,7 +74,17 @@ impl TypstLanguageService {
         None
     }
 
-    fn new_world(
+    fn new_world_from_str(
+        &self,
+        uri: &Url,
+        text: String,
+    ) -> Option<(PathBuf, Arc<Mutex<LanguageServiceWorld>>)> {
+        log::info!("initialize world from main file with text");
+        let path = Path::new(uri.path());
+        self.new_world_from_path(path, Some(text))
+    }
+
+    fn new_world_from_uri(
         &self,
         uri: &Url,
     ) -> Option<(PathBuf, Arc<Mutex<LanguageServiceWorld>>)> {
@@ -89,25 +99,92 @@ impl TypstLanguageService {
         // found nothing then fallback to base directory of the file.
         let root_dir = search_workspace(root_dir).unwrap_or(root_dir);
 
-        // Create a new world and insert it to world index.
-        match LanguageServiceWorld::new(root_dir, path) {
+        // Create a new world and insert it to world index. If there are no valid targets then
+        // create file-specific world; otherwise; search once again.
+        let targets = search_targets(vec![root_dir]);
+        log::info!("found {} target(s)", targets.len());
+        match self.new_worlds(targets) {
+            0 => self.new_world_from_path(path, None),
+            _ => self
+                .find_world(uri)
+                .or_else(|| self.new_world_from_path(path, None)),
+        }
+    }
+
+    fn new_world_from_path(
+        &self,
+        main_file: &Path,
+        main_text: Option<String>,
+    ) -> Option<(PathBuf, Arc<Mutex<LanguageServiceWorld>>)> {
+        log::info!("initialize world from main file: path={:?}", main_file);
+        let root_dir = main_file.parent()?;
+        match LanguageServiceWorld::new(&root_dir, &main_file, main_text) {
             Some(world) => {
-                let root_dir = root_dir.to_path_buf();
+                log::info!(
+                    "initialize world for {:?} at {:?}",
+                    main_file,
+                    root_dir,
+                );
                 let world = Arc::new(Mutex::new(world));
                 self.worlds
                     .write()
                     .unwrap()
-                    .insert(root_dir.clone(), world.clone());
-                Some((root_dir, world))
+                    .insert(root_dir.to_path_buf(), world.clone());
+                return Some((root_dir.to_path_buf(), world));
             }
             None => {
                 log::error!(
-                    "failed to create new world from scratch for {:?}",
-                    path
+                    "failed to initialize world for {:?} at {:?}",
+                    main_file,
+                    root_dir,
                 );
-                None
+                return None;
             }
         }
+    }
+
+    fn new_worlds(&self, targets: Vec<Target>) -> u32 {
+        let mut counter: u32 = 0;
+        for (index, target) in targets.iter().enumerate() {
+            let Some(relpath) =
+                target.main_file.strip_prefix(&target.root_dir).ok()
+            else {
+                log::warn!(
+                    "[{}] main file {:?} is not descendant of {:?}: skip it",
+                    index,
+                    target.root_dir,
+                    target.main_file
+                );
+                continue;
+            };
+            match LanguageServiceWorld::new(
+                &target.root_dir,
+                &target.main_file,
+                None,
+            ) {
+                Some(world) => {
+                    log::info!(
+                        "[{}] initialize world for {:?} at {:?}",
+                        index,
+                        relpath,
+                        target.root_dir,
+                    );
+                    let world = Mutex::new(world);
+                    self.worlds
+                        .write()
+                        .unwrap()
+                        .insert(target.root_dir.clone(), world.into());
+                    counter += 1;
+                }
+                None => log::error!(
+                    "[{}] failed to initialize world for {:?} at {:?}",
+                    index,
+                    relpath,
+                    target.root_dir,
+                ),
+            };
+        }
+        counter
     }
 }
 
@@ -149,39 +226,7 @@ impl LanguageServer for TypstLanguageService {
         let targets = search_targets(root_dirs);
 
         log::info!("found {} target(s)", targets.len());
-        for (index, ent) in targets.iter().enumerate() {
-            let Some(relpath) = ent.main_file.strip_prefix(&ent.root_dir).ok()
-            else {
-                log::warn!(
-                    "[{}] main file {:?} is not descendant of {:?}: skip it",
-                    index,
-                    ent.root_dir,
-                    ent.main_file
-                );
-                continue;
-            };
-            match LanguageServiceWorld::new(&ent.root_dir, &ent.main_file) {
-                Some(world) => {
-                    log::info!(
-                        "[{}] initialize world for {:?} at {:?}",
-                        index,
-                        relpath,
-                        ent.root_dir,
-                    );
-                    let world = Mutex::new(world);
-                    self.worlds
-                        .write()
-                        .unwrap()
-                        .insert(ent.root_dir.clone(), world.into());
-                }
-                None => log::error!(
-                    "[{}] failed to initialize world for {:?} at {:?}",
-                    index,
-                    relpath,
-                    ent.root_dir,
-                ),
-            };
-        }
+        self.new_worlds(targets);
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -287,15 +332,17 @@ impl LanguageServer for TypstLanguageService {
         // create a new world non-atomically. This means that a concurrent
         // call can create a new world faster.
         let path = Path::new(uri.path());
-        let Some((root_dir, world)) =
-            self.find_world(&uri).or_else(|| self.new_world(&uri))
+        let text = params.text_document.text;
+        let Some((root_dir, world)) = self
+            .find_world(&uri)
+            .or_else(|| self.new_world_from_uri(&uri))
+            .or_else(|| self.new_world_from_str(&uri, text.clone()))
         else {
             log::error!("failed to find or initialize new world");
             return;
         };
 
         log::info!("found world rooted at {:?}", root_dir);
-        let text = params.text_document.text;
         world.lock().unwrap().add_file(path, text);
         let _ = self.compile(&uri);
     }

@@ -107,7 +107,21 @@ impl LanguageServiceWorld {
     pub fn new(
         root_dir: &Path,
         main_path: &Path,
+        main_text: Option<String>,
     ) -> Option<LanguageServiceWorld> {
+        // Read main file or fail.
+        let vpath = VirtualPath::within_root(main_path, root_dir)?;
+        let file_id = FileId::new(None, vpath);
+        let text = main_text.or_else(|| match fs::read(main_path) {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Err(_) => None,
+        })?;
+        let source = Source::new(file_id, text);
+        let sources = HashMap::<PathBuf, Source>::from([(
+            main_path.to_path_buf(),
+            source,
+        )]);
+
         let mut db = Database::new();
         db.load_system_fonts();
 
@@ -134,20 +148,6 @@ impl LanguageServiceWorld {
                 });
             }
         }
-
-        // Read main file or fail.
-        let vpath = VirtualPath::within_root(main_path, root_dir)?;
-        let file_id = FileId::new(None, vpath);
-        let source = match fs::read(main_path) {
-            Ok(bytes) => String::from_utf8(bytes)
-                .ok()
-                .map(|text| Source::new(file_id, text)),
-            Err(_) => None,
-        }?;
-        let sources = HashMap::<PathBuf, Source>::from([(
-            main_path.to_path_buf(),
-            source,
-        )]);
 
         Some(Self {
             root_dir: root_dir.to_path_buf(),
