@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::result;
@@ -13,10 +14,8 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::instrument;
-use tracing_subscriber::{
-    fmt, layer::SubscriberExt, util::SubscriberInitExt, util::TryInitError,
-    EnvFilter,
-};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{fmt, util::SubscriberInitExt, EnvFilter};
 use typst_ide::CompletionKind;
 
 use typstd::LanguageServiceWorld;
@@ -415,32 +414,37 @@ struct Args {
 }
 
 #[cfg(not(feature = "otel"))]
-fn set_up_logging() -> result::Result<(), TryInitError> {
-    let log_file = tracing_appender::rolling::never(".", "typstd.log");
-
-    // Parse an `EnvFilter` configuration from the `RUST_LOG`
-    // environment variable.
+fn init_logging(
+    log_output: Option<String>,
+) -> result::Result<(), Box<dyn Error>> {
     let filter = EnvFilter::from_env("TYPSTD_LOG")
         .add_directive("typstd=info".parse().unwrap());
 
-    // Use the tracing subscriber `Registry`, or any other subscriber
-    // that impls `LookupSpan`
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::Layer::default().with_writer(log_file).with_ansi(false))
-        .try_init()
+    let registry = tracing_subscriber::registry().with(filter);
+
+    match log_output {
+        Some(path) => {
+            let path = Path::new(&path);
+            let log_dir = path.parent().unwrap_or(Path::new("."));
+            let filename = path.file_name().ok_or("invalid log filename")?;
+            let layer = fmt::Layer::default()
+                .with_writer(tracing_appender::rolling::never(
+                    log_dir, filename,
+                ))
+                .with_ansi(false);
+            Ok(registry.with(layer).try_init()?)
+        }
+        None => Ok(registry.try_init()?),
+    }
 }
 
 #[cfg(feature = "otel")]
-fn set_up_logging() -> result::Result<(), TryInitError> {
-    // TODO: Take value either from envvar or CLI argument.
-    let log_file = tracing_appender::rolling::never(".", "typstd.log");
-
+fn init_logging() -> result::Result<(), Box<dyn Error>> {
     let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(opentelemetry_otlp::new_exporter().tonic())
         .install_simple()
-        .expect("Unable to initialize OtlpPipeline");
+        .expect("unable to initialize OtlpPipeline");
 
     // Create a tracing layer with the configured tracer
     let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -452,29 +456,40 @@ fn set_up_logging() -> result::Result<(), TryInitError> {
 
     // Use the tracing subscriber `Registry`, or any other subscriber
     // that impls `LookupSpan`
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(opentelemetry)
-        .with(filter)
-        .with(fmt::Layer::default().with_writer(log_file).with_ansi(false))
-        .try_init()
+        .with(filter);
+
+    match log_output {
+        Some(path) => {
+            let path = Path::new(&path);
+            let log_dir = path.parent().unwrap_or(Path::new("."));
+            let filename = path.file_name().ok_or("invalid log filename")?;
+            let layer = fmt::Layer::default()
+                .with_writer(tracing_appender::rolling::never(
+                    log_dir, filename,
+                ))
+                .with_ansi(false);
+            Ok(registry.with(layer).try_init()?)
+        }
+        None => Ok(registry.try_init()?),
+    }
 }
 
 #[tokio::main]
 pub async fn main() {
-    // TODO: Take value either from envvar or CLI argument.
-    let _ = set_up_logging();
-
     let args = Args::parse();
     if args.listen.is_some() {
-        tracing::error!("not implemented"); // TODO
-    } else {
-        let stdin = tokio::io::stdin();
-        let stdout = tokio::io::stdout();
-        let (service, socket) =
-            LspService::new(|client| TypstLanguageService {
-                client: client,
-                worlds: Default::default(),
-            });
-        Server::new(stdin, stdout, socket).serve(service).await;
-    };
+        unimplemented!("serve over listen TCP/UDP sockets and WebSocket");
+    }
+
+    let _ = init_logging(args.log_output);
+
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let (service, socket) = LspService::new(|client| TypstLanguageService {
+        client: client,
+        worlds: Default::default(),
+    });
+    Server::new(stdin, stdout, socket).serve(service).await;
 }
