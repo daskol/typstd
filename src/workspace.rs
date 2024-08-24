@@ -53,10 +53,10 @@ pub fn load_targets(root_dir: &Path) -> Result<Vec<Target>, String> {
         .documents
         .iter()
         .map(|doc| Target {
-            root_dir: doc.root_dir.clone().map_or_else(
-                || root_dir.to_path_buf(),
-                |dir| PathBuf::from(dir),
-            ),
+            root_dir: doc
+                .root_dir
+                .clone()
+                .map_or_else(|| root_dir.to_path_buf(), PathBuf::from),
             main_file: root_dir.join(&doc.entrypoint),
         })
         .collect();

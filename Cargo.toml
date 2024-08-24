@@ -13,10 +13,6 @@ edition = "2021"
 name = "typstd"
 path = "src/bin/main.rs"
 
-[[bin]]
-name = "typstd-compile"
-path = "src/bin/compile.rs"
-
 [dependencies]
 # Asset management.
 fontdb = { version = "0.15", features = ["memmap", "fontconfig"] }

@@ -35,7 +35,7 @@ impl TypstLanguageService {
     /// Compile document and update user with compilation status.
     fn compile(&self, uri: &Url) -> result::Result<(), String> {
         log::info!("try to compile document");
-        let Some((_, world)) = self.find_world(&uri) else {
+        let Some((_, world)) = self.find_world(uri) else {
             return Err("missing compilation context".to_string());
         };
         let started_at = Instant::now();
@@ -118,7 +118,7 @@ impl TypstLanguageService {
     ) -> Option<(PathBuf, Arc<Mutex<LanguageServiceWorld>>)> {
         log::info!("initialize world from main file: path={:?}", main_file);
         let root_dir = main_file.parent()?;
-        match LanguageServiceWorld::new(&root_dir, &main_file, main_text) {
+        match LanguageServiceWorld::new(root_dir, main_file, main_text) {
             Some(world) => {
                 log::info!(
                     "initialize world for {:?} at {:?}",
@@ -130,7 +130,7 @@ impl TypstLanguageService {
                     .write()
                     .unwrap()
                     .insert(root_dir.to_path_buf(), world.clone());
-                return Some((root_dir.to_path_buf(), world));
+                Some((root_dir.to_path_buf(), world))
             }
             None => {
                 log::error!(
@@ -138,7 +138,7 @@ impl TypstLanguageService {
                     main_file,
                     root_dir,
                 );
-                return None;
+                None
             }
         }
     }

@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use comemo::Prehashed;
-use fontdb;
 use fontdb::Database;
 use typst::diag::{FileError, FileResult};
 use typst::eval::Tracer;
@@ -128,7 +127,7 @@ impl LanguageServiceWorld {
         let mut book = FontBook::new();
         let mut fonts = Vec::<LazyFont>::new();
         add_embedded_fonts(&mut book, &mut fonts);
-        for (_, face) in db.faces().enumerate() {
+        for face in db.faces() {
             let path = match &face.source {
                 fontdb::Source::Binary(_) => continue,
                 fontdb::Source::File(path) => path,
@@ -163,7 +162,7 @@ impl LanguageServiceWorld {
     pub fn add_file(&mut self, path: &Path, text: String) {
         // Make FileID (an internal identifier for a file in Typst).
         let root_dir = path.parent().unwrap();
-        let vpath = VirtualPath::within_root(&path, &root_dir).unwrap();
+        let vpath = VirtualPath::within_root(path, root_dir).unwrap();
         let id = FileId::new(None, vpath);
 
         // // Read file content, decode and return it as a source.
@@ -177,7 +176,7 @@ impl LanguageServiceWorld {
     fn read_source(&self, path: &Path, id: FileId) -> FileResult<Source> {
         // If source is missing then read it from file system.
         log::info!("source(): read source from fs with id={:?}", id);
-        match fs::read(&path) {
+        match fs::read(path) {
             Ok(bytes) => String::from_utf8(bytes).map_or(
                 Err(FileError::InvalidUtf8),
                 |text| {
@@ -236,7 +235,7 @@ impl LanguageServiceWorld {
         // Do some garbage collection sweeping out objectes older than N
         // cycles (see typst-cli for details).
         comemo::evict(10);
-        return result;
+        result
     }
 
     pub fn complete(
