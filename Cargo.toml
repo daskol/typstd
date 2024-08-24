@@ -1,6 +1,6 @@
 [package]
 name = "typstd"
-version = "0.0.0"
+version = "0.0.1"
 description = "A plain and simple language server for Typst markup language."
 authors = ["Daniel Bershatsky <daniel.bershatsky@gmail.com>"]
 license = "MIT"

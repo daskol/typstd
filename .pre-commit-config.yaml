@@ -8,11 +8,8 @@ repos:
       - id: check-yaml
       - id: end-of-file-fixer
       - id: trailing-whitespace
-      - id: debug-statements
 
   - repo: https://github.com/backplane/pre-commit-rust-hooks
     rev: v1.1.0
     hooks:
-    -   id: fmt
-    -   id: check
-    -   id: clippy
+      - id: fmt

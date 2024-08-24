@@ -1,13 +1,17 @@
 # Typstd
 
+![Linting and testing][1]
+
+[1]: https://github.com/daskol/typstd/actions/workflows/on-push.yml/badge.svg
+
 ## Overview
 
-**Typstd** is a pretty simple language server for [Typst][1] markup language.
+**Typstd** is a pretty simple language server for [Typst][2] markup language.
 Its distinctive feature is workspace management and completion for global
 objects which are defined out of scope of text document in focus (e.g.
 bibliography references).
 
-[1]: https://github.com/typst/typst
+[2]: https://github.com/typst/typst
 
 ### Workspace
 
