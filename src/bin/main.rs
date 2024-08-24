@@ -467,7 +467,7 @@ struct Args {
     listen: Option<String>,
 }
 
-#[cfg(not(feature = "otel"))]
+#[cfg(not(feature = "telemetry"))]
 fn init_logging(
     log_output: Option<String>,
 ) -> result::Result<(), Box<dyn Error>> {
@@ -492,7 +492,7 @@ fn init_logging(
     }
 }
 
-#[cfg(feature = "otel")]
+#[cfg(feature = "telemetry")]
 fn init_logging() -> result::Result<(), Box<dyn Error>> {
     let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
