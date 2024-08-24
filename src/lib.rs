@@ -11,7 +11,7 @@ use fontdb;
 use fontdb::Database;
 use typst::diag::{FileError, FileResult};
 use typst::eval::Tracer;
-use typst::foundations::{Bytes, Datetime};
+use typst::foundations::{Bytes, Datetime, Smart};
 use typst::model::Document;
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst::text::{Font, FontBook, FontInfo};
@@ -152,7 +152,7 @@ impl LanguageServiceWorld {
         Some(Self {
             root_dir: root_dir.to_path_buf(),
             main_path: main_path.to_path_buf(),
-            library: Prehashed::new(Library::build()),
+            library: Prehashed::new(Library::default()),
             book: Prehashed::new(book),
             fonts: fonts,
             sources: sources.into(),
@@ -219,7 +219,7 @@ impl LanguageServiceWorld {
         let result = match typst::compile(self, &mut tracer) {
             Ok(doc) => {
                 log::info!("compiled successfully");
-                let buffer = typst_pdf::pdf(&doc, None, None);
+                let buffer = typst_pdf::pdf(&doc, Smart::Auto, None);
                 let _ = fs::write("main.pdf", buffer).map_err(|err| {
                     log::error!("failed to write PDF file ({err})")
                 });

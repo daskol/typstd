@@ -53,10 +53,10 @@ tar = "0.4"
 ureq = "2"
 
 # Typst packages.
-comemo = "0.3"
-typst = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
-typst-ide = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
-typst-pdf = { git = "https://github.com/typst/typst.git", tag = "v0.10.0" }
+comemo = "0.4"
+typst = { git = "https://github.com/typst/typst.git", tag = "v0.11.1" }
+typst-ide = { git = "https://github.com/typst/typst.git", tag = "v0.11.1" }
+typst-pdf = { git = "https://github.com/typst/typst.git", tag = "v0.11.1" }
 
 [features]
 telemetry = [
